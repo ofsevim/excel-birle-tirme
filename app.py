@@ -2,89 +2,95 @@ import streamlit as st
 import pandas as pd
 import io
 
-# Sayfa Ayarları
-st.set_page_config(page_title="Personel Güncelleyici", layout="wide")
+st.set_page_config(page_title="Personel Güncelleyici & Raporlayıcı", layout="wide")
 
-st.title("🚀 Personel Veri Güncelleme Aracı (Sicil Odaklı)")
-st.markdown("""
-Bu araç, **Sicil** numarası üzerinden eşleştirme yapar. 
-Eski listedeki personelin **Görev Yeri** ve **Unvan** bilgilerini yeni listedeki verilerle günceller.
-""")
+st.title("🚀 Personel Veri Güncelleme ve Raporlama")
+st.markdown("Sicil üzerinden eşleştirme yapar ve değişimleri raporlar.")
 
-# Dosya Yükleme
 col1, col2 = st.columns(2)
 with col1:
     eski_file = st.file_uploader("1. Eski (Ana) Excel'i Yükle", type=["xlsx"])
 with col2:
     yeni_file = st.file_uploader("2. Yeni Verili Excel'i Yükle", type=["xlsx"])
 
-# Eşleşecek sütunlar (Sicil'i en başa aldık)
-keys_input = st.text_input("Eşleşecek Sütunlar (Virgülle ayırın)", value="Sicil, Personel")
+keys_input = st.text_input("Eşleşecek Sütunlar (Örn: Sicil veya Sicil, Personel)", value="Sicil")
 
-if st.button("Verileri Eşleştir ve Güncelle", type="primary"):
+if st.button("Güncelle ve Rapor Oluştur", type="primary"):
     if eski_file and yeni_file:
         try:
-            # Excel dosyalarını oku
             df_eski = pd.read_excel(eski_file)
             df_yeni = pd.read_excel(yeni_file)
 
-            # Sütun isimlerindeki boşlukları temizle
+            # Sütun isimlerini temizle
             df_eski.columns = [str(c).strip() for c in df_eski.columns]
             df_yeni.columns = [str(c).strip() for c in df_yeni.columns]
             
             anahtar_sutunlar = [s.strip() for s in keys_input.split(",")]
 
-            # Sütun kontrolü
-            missing = [c for c in anahtar_sutunlar if c not in df_eski.columns or c not in df_yeni.columns]
-            
-            if missing:
-                st.error(f"Şu sütunlar dosyalarda bulunamadı: {missing}")
-                st.info(f"Eski Dosya Sütunları: {list(df_eski.columns)}")
-                st.info(f"Yeni Dosya Sütunları: {list(df_yeni.columns)}")
-            else:
-                # Geçici temiz tablolar oluştur
+            if all(c in df_eski.columns and c in df_yeni.columns for c in anahtar_sutunlar):
+                # Eşleşme hazırlığı
                 df_eski_temp = df_eski.copy()
                 df_yeni_temp = df_yeni.copy()
                 
-                match_cols = []
-                for col in anahtar_sutunlar:
-                    m_col = f"{col}_match"
-                    # Sayısal verileri (Sicil gibi) metne çevir, küçük harf yap ve temizle
-                    df_eski_temp[m_col] = df_eski_temp[col].astype(str).str.lower().str.strip()
-                    df_yeni_temp[m_col] = df_yeni_temp[col].astype(str).str.lower().str.strip()
-                    match_cols.append(m_col)
+                # Eşleşme anahtarını oluştur
+                df_eski_temp['match_key'] = df_eski_temp[anahtar_sutunlar].astype(str).sum(axis=1).str.lower().str.strip()
+                df_yeni_temp['match_key'] = df_yeni_temp[anahtar_sutunlar].astype(str).sum(axis=1).str.lower().str.strip()
 
-                # ÇOK ÖNEMLİ: Mükerrer (aynı sicile sahip birden fazla satır) kayıtları temizle
-                # Bu adım "non-unique multi-index" hatasını engeller.
-                df_eski_temp = df_eski_temp.drop_duplicates(subset=match_cols)
-                df_yeni_temp = df_yeni_temp.drop_duplicates(subset=match_cols)
+                # Mükerrerleri temizle
+                df_eski_temp = df_eski_temp.drop_duplicates('match_key')
+                df_yeni_temp = df_yeni_temp.drop_duplicates('match_key')
 
-                # Index set et
-                df_eski_temp.set_index(match_cols, inplace=True)
-                df_yeni_temp.set_index(match_cols, inplace=True)
+                # Karşılaştırma için birleştir
+                df_merge = pd.merge(df_eski_temp, df_yeni_temp, on='match_key', suffixes=('_eski', '_yeni'))
 
-                # GÜNCELLEME İŞLEMİ
-                # Eski listedeki verileri, yeni listedeki karşılıklarıyla değiştirir.
-                df_eski_temp.update(df_yeni_temp)
+                # --- RAPORLAMA MANTIĞI ---
+                rapor_listesi = []
+                guncellenen_df = df_eski.copy()
+                guncellenen_df['match_key'] = guncellenen_df[anahtar_sutunlar].astype(str).sum(axis=1).str.lower().str.strip()
+                
+                degisim_sayisi = 0
 
-                # Sonucu orijinal haline döndür (geçici kolonları at)
-                sonuc = df_eski_temp.reset_index(drop=True)
+                for index, row in df_merge.iterrows():
+                    degisim_notu = []
+                    # Sadece belirli kolonlardaki değişimlere bak (Örn: Görev Yeri, Unvan)
+                    for col in df_yeni.columns:
+                        if col not in anahtar_sutunlar and col in df_eski.columns:
+                            eski_val = str(row[f"{col}_eski"])
+                            yeni_val = str(row[f"{col}_yeni"])
+                            
+                            if eski_val != yeni_val and yeni_val != "nan":
+                                degisim_notu.append(f"{col}: {eski_val} ➡️ {yeni_val}")
+                                # Ana dosyayı güncelle
+                                guncellenen_df.loc[guncellenen_df['match_key'] == row['match_key'], col] = row[f"{col}_yeni"]
 
-                # Excel İndirme Hazırlığı
+                    if degisim_notu:
+                        degisim_sayisi += 1
+                        rapor_listesi.append({
+                            "Personel": row.get('Personel_eski', row['match_key']),
+                            "Sicil": row.get('Sicil_eski', 'N/A'),
+                            "Değişimler": " | ".join(degisim_notu)
+                        })
+
+                # Arayüz Raporu
+                st.divider()
+                c1, c2 = st.columns(2)
+                c1.metric("Toplam Kayıt", len(df_eski))
+                c2.metric("Güncellenen Kişi Sayısı", degisim_sayisi)
+
+                if rapor_listesi:
+                    st.subheader("📋 Değişim Raporu Detayları")
+                    st.table(pd.DataFrame(rapor_listesi))
+                else:
+                    st.info("Herhangi bir veri değişimi tespit edilmedi.")
+
+                # İndirme İşlemi
+                guncellenen_df.drop(columns=['match_key'], inplace=True)
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                    sonuc.to_excel(writer, index=False)
+                    guncellenen_df.to_excel(writer, index=False)
                 
-                st.success(f"İşlem tamam! {len(sonuc)} personel kontrol edildi ve güncellendi.")
-                
-                st.download_button(
-                    label="Güncellenmiş Excel'i İndir",
-                    data=output.getvalue(),
-                    file_name="guncellenmiş_personel_listesi.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-
+                st.download_button("Güncel Excel'i İndir", output.getvalue(), "guncellenmis_personel_listesi.xlsx")
+            else:
+                st.error("Belirlediğiniz anahtar sütunlar dosyalarda bulunamadı.")
         except Exception as e:
-            st.error(f"Beklenmedik bir hata oluştu: {e}")
-    else:
-        st.warning("Lütfen her iki Excel dosyasını da yükleyin.")
+            st.error(f"Hata: {e}")
